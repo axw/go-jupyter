@@ -1,4 +1,4 @@
-package igo
+package jupyter
 
 type Kernel interface {
 	Info() KernelInfo

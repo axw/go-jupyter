@@ -1,6 +1,6 @@
-// Package igo implements the machinery necessary to run a Go kernel for IPython.
-// It should be installed with an "igo" command to launch the kernel.
-package igo
+// Package jupyter implements the machinery necessary to implement and run a
+// kernel for Jupyter.
+package jupyter
 
 import (
 	"encoding/json"
@@ -107,14 +107,14 @@ func createSockets(connInfo *ConnectionInfo) (*zmq.Context, *sockets, error) {
 	go func() {
 		err := zmq.Proxy(heartbeatSocket, heartbeatSocket, nil)
 		if err != nil {
-			// TODO(axw) log error
+			log.Printf("error: %v", err)
 		}
 	}()
 	return context, &sockets, nil
 }
 
 // RunKernel is the main entry point to start the kernel. This is what is called by the
-// igo executable.
+// kernel executable.
 func RunKernel(kernel Kernel, connInfo *ConnectionInfo) error {
 	context, sockets, err := createSockets(connInfo)
 	if err != nil {
@@ -127,7 +127,7 @@ func RunKernel(kernel Kernel, connInfo *ConnectionInfo) error {
 	if err == nil {
 		err = err2
 	} else if err2 != nil {
-		// TODO(axw) log err2
+		log.Printf("error terminating: %v", err2)
 	}
 	return err
 }

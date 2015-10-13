@@ -1,4 +1,4 @@
-package igo
+package jupyter
 
 import (
 	"crypto/rand"
