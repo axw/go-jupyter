@@ -20,6 +20,7 @@ const (
 	messageTypeShutdownRequest   = "shutdown_request"
 	messageTypeShutdownReply     = "shutdown_reply"
 	messageTypeStatus            = "status"
+	messageTypeError             = "error"
 	messageTypeIsCompleteRequest = "is_complete_request"
 	messageTypeIsCompleteReply   = "is_complete_reply"
 	messageTypeCompleteRequest   = "complete_request"
@@ -99,6 +100,13 @@ type executeResult struct {
 	Source         string                 `json:"source"`
 	Data           map[string]interface{} `json:"data"`
 	Metadata       map[string]interface{} `json:"metadata"`
+}
+
+type executeError struct {
+	ExecutionCount int      `json:"execution_count"`
+	ErrorName      string   `json:"ename,omitempty"`
+	ErrorValue     string   `json:"evalue,omitempty"`
+	Traceback      []string `json:"traceback,omitempty"`
 }
 
 type kernelStatus string

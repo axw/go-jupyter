@@ -3,10 +3,13 @@
 package jupyter
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"runtime"
 
 	zmq "github.com/pebbe/zmq4"
 )
@@ -232,14 +235,23 @@ func (k *kernelRunner) handleExecuteRequest(msg *message, ids []string, socket *
 		Status:         "ok",
 		ExecutionCount: k.executionCounter,
 	}
-	result, err := k.execute(request)
+	result, traceback, err := k.execute(request)
 	if err != nil {
 		reply.Status = "error"
 		reply.ErrorName = fmt.Sprintf("%T", err)
 		reply.ErrorValue = err.Error()
-		// TODO(axw) traceback. need to change k.execute to
-		// return a traceback as well as error.
-		//reply.Traceback = ...
+		reply.Traceback = traceback
+		errorContent := executeError{
+			ExecutionCount: reply.ExecutionCount,
+			ErrorName:      reply.ErrorName,
+			ErrorValue:     reply.ErrorValue,
+			Traceback:      reply.Traceback,
+		}
+		if err := k.publish(
+			messageTypeError, &errorContent, msg.Header,
+		); err != nil {
+			return fmt.Errorf("sending execution error: %v", err)
+		}
 	}
 
 	if reply.Status == "ok" {
@@ -247,7 +259,7 @@ func (k *kernelRunner) handleExecuteRequest(msg *message, ids []string, socket *
 		if err != nil {
 			return fmt.Errorf("rendering execution result: %v", err)
 		}
-		resultContent := &executeResult{
+		resultContent := executeResult{
 			Source:         "kernel",
 			ExecutionCount: k.executionCounter,
 			Data:           resultData,
@@ -272,9 +284,24 @@ func (k *kernelRunner) handleExecuteRequest(msg *message, ids []string, socket *
 	return k.publish(messageTypeStatus, statusIdle, msg.Header)
 }
 
-func (k *kernelRunner) execute(request executeRequest) (result interface{}, err error) {
+func (k *kernelRunner) execute(request executeRequest) (
+	result interface{},
+	traceback []string,
+	err error,
+) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			buf := make([]byte, 8192)
+			buf = buf[:runtime.Stack(buf, false)]
+			scanner := bufio.NewScanner(bytes.NewBuffer(buf))
+			for scanner.Scan() {
+				traceback = append(traceback, scanner.Text())
+			}
+			if err := scanner.Err(); err != nil {
+				panic(err) // should not happen with a bytes.Buffer
+			}
+
+			// Clear the result, and recover the panic into "err".
 			result = nil
 			switch recovered := recovered.(type) {
 			case error:
@@ -284,10 +311,11 @@ func (k *kernelRunner) execute(request executeRequest) (result interface{}, err 
 			}
 		}
 	}()
-	return k.kernel.Execute(request.Code, ExecuteOptions{
+	result, err = k.kernel.Execute(request.Code, ExecuteOptions{
 		Silent:       request.Silent,
 		StoreHistory: request.StoreHistory,
 	})
+	return result, nil, err
 }
 
 // handleIsCompleteRequest handles "is_complete_request" messages,

@@ -2,12 +2,15 @@ package jupyter
 
 import (
 	"bytes"
+	"encoding/xml"
 	"fmt"
 	"image"
 	"image/png"
 	"net/http"
 	"strings"
 )
+
+const svgNamespace = "http://www.w3.org/2000/svg"
 
 // renderDisplayData takes a value and renders it in one or more display-data
 // representations.
@@ -69,6 +72,18 @@ func detectContentType(data []byte) string {
 	pos := strings.IndexRune(contentType, ';')
 	if pos != -1 {
 		contentType = contentType[:pos]
+	}
+	if contentType == "text/xml" {
+		var document struct {
+			XMLName xml.Name
+		}
+		// If we fail to unmarshal the XML, just return the
+		// content-type as it is.
+		if err := xml.Unmarshal(data, &document); err == nil {
+			if document.XMLName.Space == svgNamespace {
+				contentType = "image/svg+xml"
+			}
+		}
 	}
 	return contentType
 }
