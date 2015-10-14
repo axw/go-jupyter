@@ -20,10 +20,16 @@ const (
 	messageTypeShutdownRequest   = "shutdown_request"
 	messageTypeShutdownReply     = "shutdown_reply"
 	messageTypeStatus            = "status"
+	messageTypeIsCompleteRequest = "is_complete_request"
+	messageTypeIsCompleteReply   = "is_complete_reply"
+	messageTypeCompleteRequest   = "complete_request"
+	messageTypeCompleteReply     = "complete_reply"
 
 	statusIdle     kernelStatus = "idle"
 	statusBusy     kernelStatus = "busy"
 	statusStarting kernelStatus = "starting"
+
+	completionStatusUnknown = "unknown"
 )
 
 type message struct {
@@ -101,6 +107,28 @@ func (s kernelStatus) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		ExecutionState string `json:"execution_state"`
 	}{string(s)})
+}
+
+type isCompleteRequest struct {
+	Code string `json:"code"`
+}
+
+type isCompleteReply struct {
+	Status string `json:"status"`
+	Indent string `json:"indent,omitempty"`
+}
+
+type completeRequest struct {
+	Code      string `json:"code"`
+	CursorPos int    `json:"cursor_pos"`
+}
+
+type completeReply struct {
+	Matches     []string               `json:"matches"`
+	CursorStart int                    `json:"cursor_start"`
+	CursorEnd   int                    `json:"cursor_end"`
+	Metadata    map[string]interface{} `json:"metadata"`
+	Status      string                 `json:"status"`
 }
 
 // deserializeMessage parses a multipart 0MQ message received from a socket

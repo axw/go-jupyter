@@ -101,12 +101,7 @@ func createSockets(connInfo *ConnectionInfo) (*zmq.Context, *sockets, error) {
 		*socketPort.Socket = socket
 	}
 
-	go func() {
-		err := zmq.Proxy(heartbeatSocket, heartbeatSocket, nil)
-		if err != nil {
-			log.Printf("error proxying heartbeats: %v", err)
-		}
-	}()
+	go zmq.Proxy(heartbeatSocket, heartbeatSocket, nil)
 	return context, &sockets, nil
 }
 
@@ -127,9 +122,7 @@ func RunKernel(kernel Kernel, connInfo *ConnectionInfo) error {
 		executionCounter: 0,
 	}
 	err = k.loop()
-	log.Printf("loop exited: %v", err)
 	err2 := context.Term()
-	log.Printf("terminated: %v", err2)
 	if err == nil {
 		err = err2
 	} else if err2 != nil {
@@ -156,7 +149,6 @@ func (k *kernelRunner) loop() error {
 	poller.Add(k.sockets.Control, zmq.POLLIN)
 
 	for !k.shutdown {
-		log.Println("waiting for message")
 		polled, err := poller.Poll(-1)
 		if err != nil {
 			return fmt.Errorf("poll failed: %v", err)
@@ -218,6 +210,10 @@ func (k *kernelRunner) handleShellOrControl(msg *message, ids []string, socket *
 		}
 		k.shutdown = true
 		return nil
+	case messageTypeIsCompleteRequest:
+		return k.handleIsCompleteRequest(msg, ids, socket)
+	case messageTypeCompleteRequest:
+		return k.handleCompleteRequest(msg, ids, socket)
 	default:
 		return fmt.Errorf("unknown message type %q", msg.Header.Type)
 	}
@@ -292,6 +288,47 @@ func (k *kernelRunner) execute(request executeRequest) (result interface{}, err 
 		Silent:       request.Silent,
 		StoreHistory: request.StoreHistory,
 	})
+}
+
+// handleIsCompleteRequest handles "is_complete_request" messages,
+// used to inform the frontend whether or not a code block is
+// complete.
+func (k *kernelRunner) handleIsCompleteRequest(
+	msg *message, ids []string, socket *zmq.Socket,
+) error {
+	var request isCompleteRequest
+	if err := json.Unmarshal(msg.Content, &request); err != nil {
+		return fmt.Errorf("unmarshalling is-complete request")
+	}
+	// TODO(axw) extend Kernel with a completeness interface
+	status := isCompleteReply{
+		Status: completionStatusUnknown,
+	}
+	return k.reply(
+		messageTypeIsCompleteReply, &status, msg.Header, ids, socket,
+	)
+}
+
+// handleCompleteRequest handles "complete_request" messages,
+// to implement code-completion.
+func (k *kernelRunner) handleCompleteRequest(
+	msg *message, ids []string, socket *zmq.Socket,
+) error {
+	var request completeRequest
+	if err := json.Unmarshal(msg.Content, &request); err != nil {
+		return fmt.Errorf("unmarshalling completion request")
+	}
+	// TODO(axw) extend Kernel with a completion interface
+	reply := completeReply{
+		Matches:     []string{},
+		CursorStart: request.CursorPos,
+		CursorEnd:   request.CursorPos,
+		Metadata:    map[string]interface{}{},
+		Status:      "ok",
+	}
+	return k.reply(
+		messageTypeCompleteReply, &reply, msg.Header, ids, socket,
+	)
 }
 
 func (k *kernelRunner) handleStdin(msg *message, ids []string) error {
