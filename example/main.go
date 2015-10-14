@@ -117,6 +117,12 @@ func (k *llgoKernel) Execute(code string, options jupyter.ExecuteOptions) (inter
 		reader := base64.NewDecoder(base64.StdEncoding, strings.NewReader(imageData))
 		img, _, err := image.Decode(reader)
 		return img, err
+
+	case "svg":
+		return string(svgGopher()), nil
+
+	case "panic":
+		panic(fmt.Errorf("bad things occurred"))
 	}
 	return fmt.Sprintf("resultOf(%s)", code), nil
 }
