@@ -15,8 +15,15 @@ const (
 	messageTypeKernelInfoRequest = "kernel_info_request"
 	messageTypeKernelInfoReply   = "kernel_info_reply"
 	messageTypeExecuteRequest    = "execute_request"
+	messageTypeExecuteReply      = "execute_reply"
+	messageTypeExecuteResult     = "execute_result"
 	messageTypeShutdownRequest   = "shutdown_request"
 	messageTypeShutdownReply     = "shutdown_reply"
+	messageTypeStatus            = "status"
+
+	statusIdle     kernelStatus = "idle"
+	statusBusy     kernelStatus = "busy"
+	statusStarting kernelStatus = "starting"
 )
 
 type message struct {
@@ -32,6 +39,68 @@ type messageHeader struct {
 	Session  string `json:"session"`
 	Type     string `json:"msg_type"`
 	Version  string `json:"version,omitempty"`
+}
+
+type executeRequest struct {
+	// Source code to be executed by the kernel, one or more lines.
+	Code string `json:"code"`
+
+	// A boolean flag which, if True, signals the kernel to execute
+	// this code as quietly as possible.
+	// silent=True forces store_history to be False,
+	// and will *not*:
+	//   - broadcast output on the IOPUB channel
+	//   - have an execute_result
+	// The default is False.
+	Silent bool `json:"silent"`
+
+	// A boolean flag which, if True, signals the kernel to populate history
+	// The default is True if silent is False.  If silent is True, store_history
+	// is forced to be False.
+	StoreHistory bool `json:"store_history"`
+
+	// A dict mapping names to expressions to be evaluated in the
+	// user's dict. The rich display-data representation of each will be
+	// evaluated after execution.
+	// See the display_data content for the structure of the representation data.
+	UserExpressions map[string]string `json:"user_expressions"`
+
+	// Some frontends do not support stdin requests.
+	// If raw_input is called from code executed from such a frontend,
+	// a StdinNotImplementedError will be raised.
+	AllowStdin bool `json:"allow_stdin"`
+
+	// A boolean flag, which, if True, does not abort the execution queue,
+	// if an exception is encountered.
+	// This allows the queued execution of multiple execute_requests, even
+	// if they generate exceptions.
+	StopOnError bool `json:"stop_on_error"`
+}
+
+type executeReply struct {
+	Status         string `json:"status"`
+	ExecutionCount int    `json:"execution_count"`
+
+	UserExpressions map[string]interface{} `json:"user_expressions,omitempty"`
+
+	ErrorName  string   `json:"ename,omitempty"`
+	ErrorValue string   `json:"evalue,omitempty"`
+	Traceback  []string `json:"traceback,omitempty"`
+}
+
+type executeResult struct {
+	ExecutionCount int                    `json:"execution_count"`
+	Source         string                 `json:"source"`
+	Data           map[string]interface{} `json:"data"`
+	Metadata       map[string]interface{} `json:"metadata"`
+}
+
+type kernelStatus string
+
+func (s kernelStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ExecutionState string `json:"execution_state"`
+	}{string(s)})
 }
 
 // deserializeMessage parses a multipart 0MQ message received from a socket
@@ -58,7 +127,7 @@ func deserializeMessage(parts []string, key []byte) (_ *message, identities []st
 
 	if parts[0] != "" {
 		mac := hmac.New(sha256.New, key)
-		for _, part := range parts[:5] {
+		for _, part := range parts[1:5] {
 			mac.Write([]byte(part))
 		}
 		signature, err := hex.DecodeString(parts[0])
@@ -88,13 +157,15 @@ func deserializeMessage(parts []string, key []byte) (_ *message, identities []st
 
 // newMessage creates a new message with the given type and parent message.
 func newMessage(messageType string, parentMessageHeader *messageHeader) (*message, error) {
-	// TODO(axw) check requirements for message ID allocation.
-	messageId := ""
+	messageId, err := newUUID()
+	if err != nil {
+		return nil, fmt.Errorf("allocating message ID: %v", err)
+	}
 	msg := &message{
 		Header: messageHeader{
-			Id:   messageId,
-			Type: messageType,
-			// TODO(axw) Version?
+			Id:      messageId,
+			Type:    messageType,
+			Version: currentProtocolVersion,
 		},
 		Content: json.RawMessage([]byte("{}")),
 	}

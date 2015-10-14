@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"log"
 
-	"github.com/davecgh/go-spew/spew"
 	zmq "github.com/pebbe/zmq4"
 )
 
@@ -92,8 +91,9 @@ func createSockets(connInfo *ConnectionInfo) (*zmq.Context, *sockets, error) {
 		if err != nil {
 			// TODO(axw) do we need to close all sockets if one
 			// fails? Is terminating the context good enough?
-			// TODO(axw) log error if Term fails?
-			context.Term()
+			if err := context.Term(); err != nil {
+				log.Printf("terminating context: %v", err)
+			}
 			return nil, nil, fmt.Errorf(
 				"creating %v socket: %v", socketPort.Name, err,
 			)
@@ -101,13 +101,10 @@ func createSockets(connInfo *ConnectionInfo) (*zmq.Context, *sockets, error) {
 		*socketPort.Socket = socket
 	}
 
-	// Message signing key
-	//sg.Key = []byte(conn_info.Key)
-
 	go func() {
 		err := zmq.Proxy(heartbeatSocket, heartbeatSocket, nil)
 		if err != nil {
-			log.Printf("error: %v", err)
+			log.Printf("error proxying heartbeats: %v", err)
 		}
 	}()
 	return context, &sockets, nil
@@ -120,10 +117,19 @@ func RunKernel(kernel Kernel, connInfo *ConnectionInfo) error {
 	if err != nil {
 		return err
 	}
+	log.Println("created sockets")
 
-	k := &kernelRunner{connInfo, sockets, false, kernel}
+	k := &kernelRunner{
+		connInfo:         connInfo,
+		sockets:          sockets,
+		kernel:           kernel,
+		shutdown:         false,
+		executionCounter: 0,
+	}
 	err = k.loop()
+	log.Printf("loop exited: %v", err)
 	err2 := context.Term()
+	log.Printf("terminated: %v", err2)
 	if err == nil {
 		err = err2
 	} else if err2 != nil {
@@ -135,10 +141,11 @@ func RunKernel(kernel Kernel, connInfo *ConnectionInfo) error {
 // kernelRunner handles the communication between Jupyter and the provided
 // Kernel.
 type kernelRunner struct {
-	connInfo *ConnectionInfo
-	sockets  *sockets
-	shutdown bool
-	kernel   Kernel
+	connInfo         *ConnectionInfo
+	sockets          *sockets
+	kernel           Kernel
+	shutdown         bool
+	executionCounter int
 }
 
 func (k *kernelRunner) loop() error {
@@ -149,6 +156,7 @@ func (k *kernelRunner) loop() error {
 	poller.Add(k.sockets.Control, zmq.POLLIN)
 
 	for !k.shutdown {
+		log.Println("waiting for message")
 		polled, err := poller.Poll(-1)
 		if err != nil {
 			return fmt.Errorf("poll failed: %v", err)
@@ -160,7 +168,8 @@ func (k *kernelRunner) loop() error {
 			}
 			switch polled.Socket {
 			case k.sockets.Shell, k.sockets.Control:
-				if err := k.handleShellOrControl(msg, ids, polled.Socket); err != nil {
+				err := k.handleShellOrControl(msg, ids, polled.Socket)
+				if err != nil {
 					log.Printf("handling request: %v", err)
 				}
 			case k.sockets.Stdin:
@@ -191,8 +200,7 @@ func (k *kernelRunner) handleShellOrControl(msg *message, ids []string, socket *
 		info.ProtocolVersion = currentProtocolVersion
 		return k.reply(messageTypeKernelInfoReply, info, msg.Header, ids, socket)
 	case messageTypeExecuteRequest:
-		// TODO(axw)
-		return fmt.Errorf("execute not implemented")
+		return k.handleExecuteRequest(msg, ids, socket)
 	case messageTypeShutdownRequest:
 		var request struct {
 			Restart bool `json:"restart"`
@@ -203,7 +211,9 @@ func (k *kernelRunner) handleShellOrControl(msg *message, ids []string, socket *
 		if err := k.kernel.Shutdown(request.Restart); err != nil {
 			return fmt.Errorf("shutting down: %v", err)
 		}
-		if err := k.reply(messageTypeShutdownReply, &request, msg.Header, ids, socket); err != nil {
+		if err := k.reply(
+			messageTypeShutdownReply, &request, msg.Header, ids, socket,
+		); err != nil {
 			return fmt.Errorf("sending shutdown reply: %v", err)
 		}
 		k.shutdown = true
@@ -213,9 +223,87 @@ func (k *kernelRunner) handleShellOrControl(msg *message, ids []string, socket *
 	}
 }
 
+func (k *kernelRunner) handleExecuteRequest(msg *message, ids []string, socket *zmq.Socket) error {
+	var request executeRequest
+	if err := json.Unmarshal(msg.Content, &request); err != nil {
+		return fmt.Errorf("unmarshalling execute request")
+	}
+	if request.StoreHistory {
+		k.executionCounter++
+	}
+
+	reply := executeReply{
+		Status:         "ok",
+		ExecutionCount: k.executionCounter,
+	}
+	result, err := k.execute(request)
+	if err != nil {
+		reply.Status = "error"
+		reply.ErrorName = fmt.Sprintf("%T", err)
+		reply.ErrorValue = err.Error()
+		// TODO(axw) traceback. need to change k.execute to
+		// return a traceback as well as error.
+		//reply.Traceback = ...
+	}
+
+	if reply.Status == "ok" {
+		resultData, resultMetadata, err := renderDisplayData(result)
+		if err != nil {
+			return fmt.Errorf("rendering execution result: %v", err)
+		}
+		resultContent := &executeResult{
+			Source:         "kernel",
+			ExecutionCount: k.executionCounter,
+			Data:           resultData,
+			Metadata:       resultMetadata,
+		}
+		if err := k.publish(
+			messageTypeExecuteResult, &resultContent, msg.Header,
+		); err != nil {
+			return fmt.Errorf("sending execution result: %v", err)
+		}
+		// TODO(axw) evaluate user expressions
+		reply.UserExpressions = make(map[string]interface{})
+	}
+
+	if err := k.reply(messageTypeExecuteReply, &reply, msg.Header, ids, socket); err != nil {
+		return fmt.Errorf("sending execute reply: %v", err)
+	}
+
+	// The kernel implicitly goes into the "busy" state while handling an
+	// execution request; the kernel must explicitly return to the "idle"
+	// state before the frontend will send new reqeusts.
+	return k.publish(messageTypeStatus, statusIdle, msg.Header)
+}
+
+func (k *kernelRunner) execute(request executeRequest) (result interface{}, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			switch recovered := recovered.(type) {
+			case error:
+				err = recovered
+			default:
+				err = fmt.Errorf("%s", recovered)
+			}
+		}
+	}()
+	return k.kernel.Execute(request.Code, ExecuteOptions{
+		Silent:       request.Silent,
+		StoreHistory: request.StoreHistory,
+	})
+}
+
 func (k *kernelRunner) handleStdin(msg *message, ids []string) error {
-	spew.Dump(msg)
 	return fmt.Errorf("stdin not implemented")
+}
+
+// publish sends a message on the IOPub socket.
+func (k *kernelRunner) publish(
+	messageType string, content interface{},
+	requestHeader messageHeader,
+) error {
+	return k.reply(messageType, content, requestHeader, []string{messageType}, k.sockets.IOPub)
 }
 
 // reply sends a reply message with the specified message type and content,

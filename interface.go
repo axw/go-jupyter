@@ -3,6 +3,7 @@ package jupyter
 type Kernel interface {
 	Info() KernelInfo
 	Shutdown(restart bool) error
+	Execute(code string, options ExecuteOptions) (interface{}, error)
 }
 
 type KernelInfo struct {
@@ -49,7 +50,7 @@ type LanguageInfo struct {
 	Version string `json:"version"`
 
 	// mimetype for script files in this language
-	Mimetype string `json:"mimetype"`
+	MimeType string `json:"mimetype"`
 
 	// Extension including the dot, e.g. '.py'
 	FileExtension string `json:"file_extension"`
@@ -71,4 +72,9 @@ type LanguageInfo struct {
 type HelpLink struct {
 	Text string `json:"text"`
 	URL  string `json:"url"`
+}
+
+type ExecuteOptions struct {
+	Silent       bool
+	StoreHistory bool
 }
