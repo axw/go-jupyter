@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/axw/jupyter"
+	"github.com/axw/go-jupyter"
 )
 
 const (
@@ -100,7 +100,7 @@ func (k *llgoKernel) Shutdown(restart bool) error {
 	return nil
 }
 
-func (k *llgoKernel) Execute(code string, options jupyter.ExecuteOptions) (interface{}, error) {
+func (k *llgoKernel) Execute(code string, options jupyter.ExecuteOptions) ([]interface{}, error) {
 	switch strings.TrimSpace(code) {
 	case "html":
 		html := fmt.Sprintf(`
@@ -111,20 +111,20 @@ func (k *llgoKernel) Execute(code string, options jupyter.ExecuteOptions) (inter
 %s
 </pre>
 </body></html>`, html.EscapeString(code))
-		return html, nil
+		return []interface{}{html}, nil
 
 	case "image":
 		reader := base64.NewDecoder(base64.StdEncoding, strings.NewReader(imageData))
 		img, _, err := image.Decode(reader)
-		return img, err
+		return []interface{}{img}, err
 
 	case "svg":
-		return string(svgGopher()), nil
+		return []interface{}{string(svgGopher())}, nil
 
 	case "panic":
 		panic(fmt.Errorf("bad things occurred"))
 	}
-	return fmt.Sprintf("resultOf(%s)", code), nil
+	return []interface{}{fmt.Sprintf("resultOf(%s)", code)}, nil
 }
 
 func main() {
