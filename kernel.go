@@ -235,7 +235,7 @@ func (k *kernelRunner) handleExecuteRequest(msg *message, ids []string, socket *
 		Status:         "ok",
 		ExecutionCount: k.executionCounter,
 	}
-	result, traceback, err := k.execute(request)
+	results, traceback, err := k.execute(request)
 	if err != nil {
 		reply.Status = "error"
 		reply.ErrorName = fmt.Sprintf("%T", err)
@@ -255,20 +255,22 @@ func (k *kernelRunner) handleExecuteRequest(msg *message, ids []string, socket *
 	}
 
 	if reply.Status == "ok" {
-		resultData, resultMetadata, err := renderDisplayData(result)
-		if err != nil {
-			return fmt.Errorf("rendering execution result: %v", err)
-		}
-		resultContent := executeResult{
-			Source:         "kernel",
-			ExecutionCount: k.executionCounter,
-			Data:           resultData,
-			Metadata:       resultMetadata,
-		}
-		if err := k.publish(
-			messageTypeExecuteResult, &resultContent, msg.Header,
-		); err != nil {
-			return fmt.Errorf("sending execution result: %v", err)
+		for _, result := range results {
+			resultData, resultMetadata, err := renderDisplayData(result)
+			if err != nil {
+				return fmt.Errorf("rendering execution result: %v", err)
+			}
+			resultContent := executeResult{
+				Source:         "kernel",
+				ExecutionCount: k.executionCounter,
+				Data:           resultData,
+				Metadata:       resultMetadata,
+			}
+			if err := k.publish(
+				messageTypeExecuteResult, &resultContent, msg.Header,
+			); err != nil {
+				return fmt.Errorf("sending execution result: %v", err)
+			}
 		}
 		// TODO(axw) evaluate user expressions
 		reply.UserExpressions = make(map[string]interface{})
@@ -285,7 +287,7 @@ func (k *kernelRunner) handleExecuteRequest(msg *message, ids []string, socket *
 }
 
 func (k *kernelRunner) execute(request executeRequest) (
-	result interface{},
+	results []interface{},
 	traceback []string,
 	err error,
 ) {
@@ -302,7 +304,7 @@ func (k *kernelRunner) execute(request executeRequest) (
 			}
 
 			// Clear the result, and recover the panic into "err".
-			result = nil
+			results = nil
 			switch recovered := recovered.(type) {
 			case error:
 				err = recovered
@@ -311,11 +313,14 @@ func (k *kernelRunner) execute(request executeRequest) (
 			}
 		}
 	}()
-	result, err = k.kernel.Execute(request.Code, ExecuteOptions{
+	results, err = k.kernel.Execute(request.Code, ExecuteOptions{
 		Silent:       request.Silent,
 		StoreHistory: request.StoreHistory,
 	})
-	return result, nil, err
+	if err != nil {
+		traceback = []string{err.Error()}
+	}
+	return results, traceback, err
 }
 
 // handleIsCompleteRequest handles "is_complete_request" messages,

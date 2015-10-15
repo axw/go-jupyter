@@ -22,7 +22,7 @@ func renderDisplayData(value interface{}) (data, metadata map[string]interface{}
 	data = make(map[string]interface{})
 	metadata = make(map[string]interface{})
 	var stringValue, contentType string
-	switch value := value.(type) {
+	switch typedValue := value.(type) {
 	case image.Image:
 		// TODO(axw) provide a way for the user to use alternative encodings?
 		//
@@ -30,10 +30,10 @@ func renderDisplayData(value interface{}) (data, metadata map[string]interface{}
 		// for displaying graphs or illustrations where PNG produces
 		// better looking images.
 		var buf bytes.Buffer
-		if err := png.Encode(&buf, value); err != nil {
+		if err := png.Encode(&buf, typedValue); err != nil {
 			return nil, nil, fmt.Errorf("encoding image: %v", err)
 		}
-		bounds := value.Bounds()
+		bounds := typedValue.Bounds()
 		data["image/png"] = buf.Bytes()
 		data["text/plain"] = fmt.Sprintf("%dx%d image", bounds.Dx(), bounds.Dy())
 		metadata["image/png"] = map[string]interface{}{
@@ -43,24 +43,24 @@ func renderDisplayData(value interface{}) (data, metadata map[string]interface{}
 		return data, metadata, nil
 
 	case []byte:
-		contentType = detectContentType(value)
-		stringValue = string(value)
+		contentType = detectContentType(typedValue)
+		stringValue = string(typedValue)
 
 	case string:
-		contentType = detectContentType([]byte(value))
-		stringValue = value
+		contentType = detectContentType([]byte(typedValue))
+		stringValue = typedValue
 
 	default:
-		stringValue = fmt.Sprint(value)
+		stringValue = fmt.Sprint(typedValue)
 		value = stringValue
 		contentType = detectContentType([]byte(stringValue))
 	}
 
-	data[contentType] = value
+	data["text/plain"] = stringValue
 	if contentType != "text/plain" {
 		// "A plain text representation should always be
 		// provided in the text/plain mime-type."
-		data["text/plain"] = stringValue
+		data[contentType] = value
 	}
 	return data, metadata, nil
 }

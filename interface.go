@@ -3,7 +3,7 @@ package jupyter
 type Kernel interface {
 	Info() KernelInfo
 	Shutdown(restart bool) error
-	Execute(code string, options ExecuteOptions) (interface{}, error)
+	Execute(code string, options ExecuteOptions) ([]interface{}, error)
 }
 
 type KernelInfo struct {

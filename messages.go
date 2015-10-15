@@ -104,9 +104,9 @@ type executeResult struct {
 
 type executeError struct {
 	ExecutionCount int      `json:"execution_count"`
-	ErrorName      string   `json:"ename,omitempty"`
-	ErrorValue     string   `json:"evalue,omitempty"`
-	Traceback      []string `json:"traceback,omitempty"`
+	ErrorName      string   `json:"ename"`
+	ErrorValue     string   `json:"evalue"`
+	Traceback      []string `json:"traceback"`
 }
 
 type kernelStatus string
