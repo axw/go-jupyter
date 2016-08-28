@@ -4,6 +4,8 @@ type Kernel interface {
 	Info() KernelInfo
 	Shutdown(restart bool) error
 	Execute(code string, options ExecuteOptions) ([]interface{}, error)
+	Complete(code string, cursorPos int) (*CompletionResult, error)
+	Completeness(code string) Completeness
 }
 
 type KernelInfo struct {
@@ -78,3 +80,27 @@ type ExecuteOptions struct {
 	Silent       bool
 	StoreHistory bool
 }
+
+type CompletionResult struct {
+	// The list of all matches to the completion request.
+	Matches []string
+
+	// The range of text that should be replaced by the above matches
+	// when a completion is accepted. Typically CursorEnd is the same
+	// as CursorPos in the request.
+	CursorStart int
+	CursorEnd   int
+
+	// Information that frontend plugins might use for extra display
+	// information about completions.
+	Metadata map[string]interface{}
+}
+
+type Completeness string
+
+const (
+	Complete            Completeness = "complete"
+	Incomplete          Completeness = "incomplete"
+	InvalidCode         Completeness = "invalid"
+	UnknownCompleteness Completeness = "unknown"
+)

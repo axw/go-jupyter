@@ -29,8 +29,6 @@ const (
 	statusIdle     kernelStatus = "idle"
 	statusBusy     kernelStatus = "busy"
 	statusStarting kernelStatus = "starting"
-
-	completionStatusUnknown = "unknown"
 )
 
 type message struct {
@@ -135,8 +133,12 @@ type completeReply struct {
 	Matches     []string               `json:"matches"`
 	CursorStart int                    `json:"cursor_start"`
 	CursorEnd   int                    `json:"cursor_end"`
-	Metadata    map[string]interface{} `json:"metadata"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	Status      string                 `json:"status"`
+
+	ErrorName  string   `json:"ename,omitempty"`
+	ErrorValue string   `json:"evalue,omitempty"`
+	Traceback  []string `json:"traceback,omitempty"`
 }
 
 // deserializeMessage parses a multipart 0MQ message received from a socket

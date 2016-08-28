@@ -45,10 +45,40 @@ func ReadConnectionFile(connectionFilePath string) (*ConnectionInfo, error) {
 
 // sockets holds the sockets for communicating with Jupyter.
 type sockets struct {
-	Shell   *zmq.Socket
-	Control *zmq.Socket
-	Stdin   *zmq.Socket
-	IOPub   *zmq.Socket
+	Heartbeat socket
+	Shell     socket
+	Control   socket
+	Stdin     socket
+	IOPub     socket
+}
+
+func (s *sockets) sockets() []*socket {
+	return []*socket{
+		&s.Heartbeat,
+		&s.Shell,
+		&s.Control,
+		&s.Stdin,
+		&s.IOPub,
+	}
+}
+
+func (s *sockets) tryClose() {
+	for _, socketPtr := range s.sockets() {
+		if socketPtr.Socket == nil {
+			continue
+		}
+		err := socketPtr.Socket.Close()
+		if err != nil {
+			log.Printf("error closing %v socket: %v", socketPtr.Name, err)
+		}
+	}
+}
+
+type socket struct {
+	*zmq.Socket
+	Name string
+	Port int
+	Type zmq.Type
 }
 
 // createSockets sets up the 0MQ sockets through which the kernel will
@@ -74,37 +104,32 @@ func createSockets(connInfo *ConnectionInfo) (*zmq.Context, *sockets, error) {
 		return socket, nil
 	}
 
-	var sockets sockets
-	var heartbeatSocket *zmq.Socket
-
-	socketPorts := []struct {
-		Name   string
-		Port   int
-		Type   zmq.Type
-		Socket **zmq.Socket
-	}{
-		{"heartbeat", connInfo.HeartbeatPort, zmq.REP, &heartbeatSocket},
-		{"shell", connInfo.ShellPort, zmq.ROUTER, &sockets.Shell},
-		{"control", connInfo.ControlPort, zmq.ROUTER, &sockets.Control},
-		{"stdin", connInfo.StdinPort, zmq.ROUTER, &sockets.Stdin},
-		{"iopub", connInfo.IOPubPort, zmq.PUB, &sockets.IOPub},
+	sockets := sockets{
+		Heartbeat: socket{Name: "heartbeat", Port: connInfo.HeartbeatPort, Type: zmq.REP},
+		Shell:     socket{Name: "shell", Port: connInfo.ShellPort, Type: zmq.ROUTER},
+		Control:   socket{Name: "control", Port: connInfo.ControlPort, Type: zmq.ROUTER},
+		Stdin:     socket{Name: "stdin", Port: connInfo.StdinPort, Type: zmq.ROUTER},
+		IOPub:     socket{Name: "iopub", Port: connInfo.IOPubPort, Type: zmq.PUB},
 	}
-	for _, socketPort := range socketPorts {
-		socket, err := bindSocket(socketPort.Type, socketPort.Port)
+
+	for _, socketPtr := range sockets.sockets() {
+		socket, err := bindSocket(socketPtr.Type, socketPtr.Port)
+		if err == nil {
+			socketPtr.Socket = socket
+			err = socket.SetLinger(0)
+		}
 		if err != nil {
-			// TODO(axw) do we need to close all sockets if one
-			// fails? Is terminating the context good enough?
+			sockets.tryClose()
 			if err := context.Term(); err != nil {
-				log.Printf("terminating context: %v", err)
+				log.Printf("error terminating context: %v", err)
 			}
 			return nil, nil, fmt.Errorf(
-				"creating %v socket: %v", socketPort.Name, err,
+				"creating %v socket: %v", socketPtr.Name, err,
 			)
 		}
-		*socketPort.Socket = socket
 	}
 
-	go zmq.Proxy(heartbeatSocket, heartbeatSocket, nil)
+	go zmq.Proxy(sockets.Heartbeat.Socket, sockets.Heartbeat.Socket, nil)
 	return context, &sockets, nil
 }
 
@@ -125,6 +150,7 @@ func RunKernel(kernel Kernel, connInfo *ConnectionInfo) error {
 		executionCounter: 0,
 	}
 	err = k.loop()
+	sockets.tryClose()
 	err2 := context.Term()
 	if err == nil {
 		err = err2
@@ -147,9 +173,9 @@ type kernelRunner struct {
 func (k *kernelRunner) loop() error {
 
 	poller := zmq.NewPoller()
-	poller.Add(k.sockets.Shell, zmq.POLLIN)
-	poller.Add(k.sockets.Stdin, zmq.POLLIN)
-	poller.Add(k.sockets.Control, zmq.POLLIN)
+	poller.Add(k.sockets.Shell.Socket, zmq.POLLIN)
+	poller.Add(k.sockets.Stdin.Socket, zmq.POLLIN)
+	poller.Add(k.sockets.Control.Socket, zmq.POLLIN)
 
 	for !k.shutdown {
 		polled, err := poller.Poll(-1)
@@ -162,14 +188,14 @@ func (k *kernelRunner) loop() error {
 				return fmt.Errorf("reading message: %v", err)
 			}
 			switch polled.Socket {
-			case k.sockets.Shell, k.sockets.Control:
+			case k.sockets.Shell.Socket, k.sockets.Control.Socket:
 				err := k.handleShellOrControl(msg, ids, polled.Socket)
 				if err != nil {
-					log.Printf("handling request: %v", err)
+					log.Printf("error handling request: %v", err)
 				}
-			case k.sockets.Stdin:
+			case k.sockets.Stdin.Socket:
 				if err := k.handleStdin(msg, ids); err != nil {
-					log.Printf("handling stdin: %v", err)
+					log.Printf("error handling stdin: %v", err)
 				}
 			}
 			if k.shutdown {
@@ -291,35 +317,13 @@ func (k *kernelRunner) execute(request executeRequest) (
 	traceback []string,
 	err error,
 ) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			buf := make([]byte, 8192)
-			buf = buf[:runtime.Stack(buf, false)]
-			scanner := bufio.NewScanner(bytes.NewBuffer(buf))
-			for scanner.Scan() {
-				traceback = append(traceback, scanner.Text())
-			}
-			if err := scanner.Err(); err != nil {
-				panic(err) // should not happen with a bytes.Buffer
-			}
-
-			// Clear the result, and recover the panic into "err".
-			results = nil
-			switch recovered := recovered.(type) {
-			case error:
-				err = recovered
-			default:
-				err = fmt.Errorf("%s", recovered)
-			}
-		}
-	}()
-	results, err = k.kernel.Execute(request.Code, ExecuteOptions{
-		Silent:       request.Silent,
-		StoreHistory: request.StoreHistory,
+	traceback, err = withRecovery(func() error {
+		results, err = k.kernel.Execute(request.Code, ExecuteOptions{
+			Silent:       request.Silent,
+			StoreHistory: request.StoreHistory,
+		})
+		return err
 	})
-	if err != nil {
-		traceback = []string{err.Error()}
-	}
 	return results, traceback, err
 }
 
@@ -333,12 +337,16 @@ func (k *kernelRunner) handleIsCompleteRequest(
 	if err := json.Unmarshal(msg.Content, &request); err != nil {
 		return fmt.Errorf("unmarshalling is-complete request")
 	}
-	// TODO(axw) extend Kernel with a completeness interface
-	status := isCompleteReply{
-		Status: completionStatusUnknown,
+	var reply isCompleteReply
+	// TODO(axw) withRecovery
+	switch completeness := k.kernel.Completeness(request.Code); completeness {
+	case Complete, Incomplete, InvalidCode:
+		reply.Status = string(completeness)
+	default:
+		reply.Status = string(UnknownCompleteness)
 	}
 	return k.reply(
-		messageTypeIsCompleteReply, &status, msg.Header, ids, socket,
+		messageTypeIsCompleteReply, &reply, msg.Header, ids, socket,
 	)
 }
 
@@ -351,11 +359,38 @@ func (k *kernelRunner) handleCompleteRequest(
 	if err := json.Unmarshal(msg.Content, &request); err != nil {
 		return fmt.Errorf("unmarshalling completion request")
 	}
-	// TODO(axw) extend Kernel with a completion interface
+	var result *CompletionResult
+	var err error
+	traceback, err := withRecovery(func() error {
+		result, err = k.kernel.Complete(request.Code, request.CursorPos)
+		if err == nil {
+			if result.Matches == nil {
+				result.Matches = []string{}
+			}
+			if result.Metadata == nil {
+				result.Metadata = make(map[string]interface{})
+			}
+		}
+		return err
+	})
+	if err != nil {
+		reply := completeReply{
+			Status:     "error",
+			ErrorName:  fmt.Sprintf("%T", err),
+			ErrorValue: err.Error(),
+			Traceback:  traceback,
+		}
+		if err := k.publish(
+			messageTypeCompleteReply, &reply, msg.Header,
+		); err != nil {
+			return fmt.Errorf("sending completion error: %v", err)
+		}
+		return nil
+	}
 	reply := completeReply{
-		Matches:     []string{},
-		CursorStart: request.CursorPos,
-		CursorEnd:   request.CursorPos,
+		Matches:     result.Matches,
+		CursorStart: result.CursorStart,
+		CursorEnd:   result.CursorEnd,
 		Metadata:    map[string]interface{}{},
 		Status:      "ok",
 	}
@@ -368,12 +403,41 @@ func (k *kernelRunner) handleStdin(msg *message, ids []string) error {
 	return fmt.Errorf("stdin not implemented")
 }
 
+// withRecovery calls the provided function and a traceback if an error
+// or panic occurs.
+func withRecovery(f func() error) (traceback []string, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			buf := make([]byte, 8192)
+			buf = buf[:runtime.Stack(buf, false)]
+			scanner := bufio.NewScanner(bytes.NewBuffer(buf))
+			for scanner.Scan() {
+				traceback = append(traceback, scanner.Text())
+			}
+			if err := scanner.Err(); err != nil {
+				panic(err) // should not happen with a bytes.Buffer
+			}
+
+			switch recovered := recovered.(type) {
+			case error:
+				err = recovered
+			default:
+				err = fmt.Errorf("%s", recovered)
+			}
+		}
+	}()
+	if err = f(); err != nil {
+		traceback = []string{err.Error()}
+	}
+	return traceback, err
+}
+
 // publish sends a message on the IOPub socket.
 func (k *kernelRunner) publish(
 	messageType string, content interface{},
 	requestHeader messageHeader,
 ) error {
-	return k.reply(messageType, content, requestHeader, []string{messageType}, k.sockets.IOPub)
+	return k.reply(messageType, content, requestHeader, []string{messageType}, k.sockets.IOPub.Socket)
 }
 
 // reply sends a reply message with the specified message type and content,
